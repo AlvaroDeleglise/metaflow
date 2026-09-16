@@ -27,6 +27,11 @@ from metaflow.plugins.tenki.tenki_decorator import TenkiDecorator
 
 MockDeco = namedtuple("MockDeco", ["name", "attributes"])
 
+# Sentinel so a fake sandbox can omit the `metadata` attribute entirely (to
+# exercise the SDK-doesn't-round-trip-metadata fallback), distinct from
+# metadata=None.
+_UNSET = object()
+
 
 class _DS(object):
     def __init__(self, type_):
@@ -212,6 +217,143 @@ def test_cli_matching_sandboxes_is_always_flow_scoped(monkeypatch):
     monkeypatch.setattr(tenki_cli, "TenkiClient", _FakeClient)
     tenki_cli._matching_sandboxes("MyFlow", None, None)
     assert captured["tags"] == ["metaflow", "metaflow-flow:myflow"]
+
+
+class _Info:
+    # Mirrors the real SDK's SandboxInfo: metadata is a Mapping[str, str].
+    def __init__(self, metadata):
+        self.metadata = metadata
+
+
+class _ListedSandbox:
+    # Mirrors the real tenki SDK shape: metadata lives on sb.info.metadata.
+    def __init__(self, name, metadata=_UNSET):
+        self.name = name
+        if metadata is not _UNSET:
+            self.info = _Info(metadata)
+
+
+def _fake_client_returning(sandboxes):
+    class _FakeClient:
+        def __init__(self, api_key=None, base_url=None):
+            pass
+
+        def list_sandboxes(self, tags=None):
+            return sandboxes
+
+    return _FakeClient
+
+
+def test_matching_sandboxes_enforces_exact_metadata_ownership(monkeypatch):
+    # Tags are a lossy, coarse filter; the authoritative ownership check is an
+    # EXACT match on the sandbox's untruncated metadata. Two sandboxes can share
+    # a (colliding) user tag but belong to different users — only the scoped
+    # user's sandbox may come back, so a user-scoped `tenki kill` can never cross
+    # the ownership boundary even when tags alias.
+    sandboxes = [
+        _ListedSandbox(
+            "mine",
+            {
+                "metaflow.flow_name": "MyFlow",
+                "metaflow.run_id": "run-1",
+                "metaflow.user": "alice",
+            },
+        ),
+        _ListedSandbox(
+            "theirs",  # different user whose tag happens to collide with "alice"
+            {
+                "metaflow.flow_name": "MyFlow",
+                "metaflow.run_id": "run-1",
+                "metaflow.user": "alice-35318264",
+            },
+        ),
+        _ListedSandbox(
+            "other-run",  # same user, different run — out of a run-scoped kill
+            {
+                "metaflow.flow_name": "MyFlow",
+                "metaflow.run_id": "run-2",
+                "metaflow.user": "alice",
+            },
+        ),
+    ]
+    monkeypatch.setattr(tenki_cli, "TenkiClient", _fake_client_returning(sandboxes))
+
+    result = tenki_cli._matching_sandboxes("MyFlow", "run-1", "alice")
+    assert [sb.name for sb in result] == ["mine"]
+
+
+def test_matching_sandboxes_falls_back_when_metadata_absent(monkeypatch):
+    # Older SDKs may not round-trip metadata on listed sandboxes. Then the exact
+    # check has nothing to compare against, so it must NOT drop the sandbox
+    # (that would leak orphans) — it falls back to the server-side tag scoping
+    # already applied by the query.
+    sandboxes = [
+        _ListedSandbox("legacy-none", None),  # metadata attr present but None
+        _ListedSandbox("legacy-missing"),  # no metadata attr at all
+    ]
+    monkeypatch.setattr(tenki_cli, "TenkiClient", _fake_client_returning(sandboxes))
+
+    result = tenki_cli._matching_sandboxes("MyFlow", "run-1", "alice")
+    assert [sb.name for sb in result] == ["legacy-none", "legacy-missing"]
+
+
+def test_matching_sandboxes_reads_metadata_via_to_dict(monkeypatch):
+    # Tolerate an SDK that wraps metadata in an object exposing to_dict().
+    class _Meta:
+        def to_dict(self):
+            return {
+                "metaflow.flow_name": "MyFlow",
+                "metaflow.run_id": "run-1",
+                "metaflow.user": "bob",
+            }
+
+    sandboxes = [_ListedSandbox("wrapped", _Meta())]
+    monkeypatch.setattr(tenki_cli, "TenkiClient", _fake_client_returning(sandboxes))
+
+    assert [sb.name for sb in tenki_cli._matching_sandboxes("MyFlow", "run-1", "bob")]
+    assert not tenki_cli._matching_sandboxes("MyFlow", "run-1", "someone-else")
+
+
+def test_matching_sandboxes_handles_non_dict_mapping(monkeypatch):
+    # The real SDK types sb.info.metadata as Mapping[str, str], which need not be
+    # a plain dict (e.g. a MappingProxyType). The ownership filter must accept
+    # any Mapping, not only dict.
+    md = types.MappingProxyType(
+        {
+            "metaflow.flow_name": "MyFlow",
+            "metaflow.run_id": "run-1",
+            "metaflow.user": "carol",
+        }
+    )
+    sandboxes = [_ListedSandbox("proxy", md)]
+    monkeypatch.setattr(tenki_cli, "TenkiClient", _fake_client_returning(sandboxes))
+
+    assert [sb.name for sb in tenki_cli._matching_sandboxes("MyFlow", "run-1", "carol")]
+    assert not tenki_cli._matching_sandboxes("MyFlow", "run-1", "carol-2")
+
+
+def test_matching_sandboxes_reads_metadata_from_sb_attr(monkeypatch):
+    # Defensive fallback: if a sandbox exposes metadata directly (no .info),
+    # it is still honored.
+    class _DirectSandbox:
+        def __init__(self, name, metadata):
+            self.name = name
+            self.metadata = metadata
+
+    sandboxes = [
+        _DirectSandbox(
+            "direct",
+            {
+                "metaflow.flow_name": "MyFlow",
+                "metaflow.run_id": "run-1",
+                "metaflow.user": "dave",
+            },
+        )
+    ]
+    monkeypatch.setattr(tenki_cli, "TenkiClient", _fake_client_returning(sandboxes))
+
+    assert [sb.name for sb in tenki_cli._matching_sandboxes("MyFlow", "run-1", "dave")]
+    assert not tenki_cli._matching_sandboxes("MyFlow", "run-1", "erin")
 
 
 def test_resolve_scope_semantics(monkeypatch):

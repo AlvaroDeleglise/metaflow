@@ -139,6 +139,17 @@ TENKI_TAG_FLOW = "metaflow-flow"
 TENKI_TAG_RUN = "metaflow-run"
 TENKI_TAG_USER = "metaflow-user"
 
+# Sandbox metadata keys carrying the EXACT (untruncated, un-normalized) identity
+# of a launch. Unlike the tags above, these are lossless, so `tenki list`/`kill`
+# use them as the AUTHORITATIVE ownership check (see tenki_cli._in_scope): the
+# tag query is only a coarse server-side narrowing, and an exact metadata match
+# is what actually keeps cleanup from crossing a flow/run/user boundary even if
+# two identities happen to normalize to the same tag. Shared with the cleanup
+# path so create and lookup never drift.
+TENKI_META_FLOW = "metaflow.flow_name"
+TENKI_META_RUN = "metaflow.run_id"
+TENKI_META_USER = "metaflow.user"
+
 # Tenki tags must be <= 32 chars from [a-z0-9_:.-]. run_id and user are
 # free-form (user is often an email with '@', IDs can be long), so an unescaped
 # value can reject sandbox creation.
@@ -226,6 +237,13 @@ def _tag(key, value):
     # budget it is truncated and suffixed with a short stable hash of the
     # original so distinct values stay distinct. Deterministic, so create
     # (tenki.py) and cleanup lookup (tenki_cli.py) always agree.
+    #
+    # This normalization is intentionally lossy (lowercasing + charset
+    # substitution), so distinct originals can still collapse to the same tag.
+    # The tag is therefore only a coarse, server-side pre-filter for
+    # `tenki list`/`kill`; the authoritative ownership check is an EXACT match
+    # on the sandbox's untruncated metadata (see tenki_cli._in_scope), which is
+    # what actually prevents cleanup from crossing a user/run boundary.
     budget = _MAX_TAG_LEN - len(key) - 1  # room after "<key>:"
     v = re.sub(r"[^a-z0-9_.-]", "-", str(value).lower()).strip("-")
     if len(v) > budget:
@@ -485,12 +503,12 @@ class Tenki(object):
                 _tag(TENKI_TAG_USER, user),
             ],
             metadata={
-                "metaflow.flow_name": flow_name,
-                "metaflow.run_id": str(run_id),
+                TENKI_META_FLOW: flow_name,
+                TENKI_META_RUN: str(run_id),
                 "metaflow.step_name": step_name,
                 "metaflow.task_id": str(task_id),
                 "metaflow.attempt": str(attempt),
-                "metaflow.user": user,
+                TENKI_META_USER: user,
             },
         )
         # A workspace is optional; pass it only when configured.

@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import traceback
+from collections.abc import Mapping
 
 import metaflow.tracing as tracing
 from metaflow import util
@@ -17,6 +18,9 @@ from metaflow.mflog import TASK_LOG_SOURCE
 
 from .tenki import (
     Tenki,
+    TENKI_META_FLOW,
+    TENKI_META_RUN,
+    TENKI_META_USER,
     TENKI_TAG,
     TENKI_TAG_FLOW,
     TENKI_TAG_RUN,
@@ -60,6 +64,55 @@ def _resolve_scope(flow_name, run_id, user, my_runs, echo):
     return run_id, user
 
 
+def _scope_metadata(flow_name, run_id, user):
+    # The EXACT (untruncated) identity a sandbox must carry to be in scope. This
+    # is the authoritative ownership check: tags are normalized/lossy and could
+    # collide, but metadata carries the exact originals the launch stored (see
+    # Tenki.launch_job). Only the fields actually in scope are required, mirroring
+    # the tag query below.
+    required = {TENKI_META_FLOW: flow_name}
+    if run_id:
+        required[TENKI_META_RUN] = str(run_id)
+    if user:
+        required[TENKI_META_USER] = user
+    return required
+
+
+def _sandbox_metadata(sb):
+    # Read the metadata mapping off a listed sandbox. On the real tenki SDK it
+    # lives at sb.info.metadata (a Mapping[str, str] on SandboxInfo); we also
+    # tolerate sb.metadata directly, or an object exposing to_dict(). Returns
+    # None when unavailable (older/different SDK shapes) so callers fall back to
+    # the tag scoping rather than dropping the sandbox.
+    info = getattr(sb, "info", None)
+    md = getattr(info, "metadata", None)
+    if md is None:
+        md = getattr(sb, "metadata", None)
+    if isinstance(md, Mapping):
+        return md
+    to_dict = getattr(md, "to_dict", None)
+    if callable(to_dict):
+        try:
+            d = to_dict()
+        except Exception:
+            return None
+        if isinstance(d, Mapping):
+            return d
+    return None
+
+
+def _in_scope(sb, required):
+    # True if the sandbox's metadata EXACTLY matches every required scope field.
+    # If the SDK does not round-trip metadata on listed sandboxes, there is
+    # nothing to verify against, so fall back to the server-side tag scoping
+    # already applied (no worse than the previous tag-only behavior, and never
+    # drops a legitimately-scoped sandbox — dropping one would leak an orphan).
+    md = _sandbox_metadata(sb)
+    if not md:
+        return True
+    return all(md.get(k) == v for k, v in required.items())
+
+
 def _matching_sandboxes(flow_name, run_id, user):
     # Always scope by flow so cleanup can never touch another flow's sandboxes.
     tags = [TENKI_TAG, _tag(TENKI_TAG_FLOW, flow_name)]
@@ -70,7 +123,12 @@ def _matching_sandboxes(flow_name, run_id, user):
     # Reuse the same client configuration as launch so `list`/`kill` work when
     # credentials are supplied only via Metaflow config, not the environment.
     client = TenkiClient(api_key=TENKI_API_KEY, base_url=TENKI_BASE_URL)
-    return client.list_sandboxes(tags=tags)
+    sandboxes = client.list_sandboxes(tags=tags)
+    # The tag query is only a coarse pre-filter (tags are lossy and can collide);
+    # enforce the ownership boundary with an exact metadata match so a scoped
+    # `list`/`kill` can never cross a flow/run/user boundary.
+    required = _scope_metadata(flow_name, run_id, user)
+    return [sb for sb in sandboxes if _in_scope(sb, required)]
 
 
 def _terminate_sandboxes(sandboxes, echo):

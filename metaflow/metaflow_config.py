@@ -6,7 +6,11 @@ import datetime
 
 from typing import Dict, List, Union, Tuple as TTuple
 from metaflow.exception import MetaflowException
-from metaflow.metaflow_config_funcs import from_conf, get_validate_choice_fn
+from metaflow.metaflow_config_funcs import (
+    from_conf,
+    get_validate_choice_fn,
+    get_validate_positive_int_fn,
+)
 
 # Recursive type alias for JSON, used by Runner API type mappings
 JSON = Union[Dict[str, "JSON"], List["JSON"], str, int, float, bool, None]
@@ -287,6 +291,14 @@ GS_STORAGE_WORKLOAD_TYPE = from_conf(
 ###
 SERVICE_URL = from_conf("SERVICE_URL")
 SERVICE_RETRY_COUNT = from_conf("SERVICE_RETRY_COUNT", 5)
+# Number of records the client asks the metadata service for per page when it
+# streams a collection (for example Flow.runs()). Page size is a transport
+# detail rather than a caller concern -- the client listing APIs hand back an
+# iterator either way -- so it is configured here instead of per call. The
+# service caps a page at 500 records; larger values are clamped client-side.
+SERVICE_PAGE_SIZE = int(
+    from_conf("SERVICE_PAGE_SIZE", 100, validate_fn=get_validate_positive_int_fn())
+)
 SERVICE_AUTH_KEY = from_conf("SERVICE_AUTH_KEY")
 SERVICE_HEADERS = from_conf("SERVICE_HEADERS", {})
 if SERVICE_AUTH_KEY is not None:
@@ -589,6 +601,32 @@ if AWS_SANDBOX_ENABLED:
     SFN_STATE_MACHINE_PREFIX = from_conf("AWS_SANDBOX_STACK_NAME")
 
 KUBERNETES_SANDBOX_INIT_SCRIPT = from_conf("KUBERNETES_SANDBOX_INIT_SCRIPT")
+
+###
+# Tenki Sandbox microVM compute backend
+###
+# API key for the Tenki SDK. The SDK also reads TENKI_API_KEY /
+# TENKI_AUTH_TOKEN directly from the environment; this is only used to forward
+# an explicit value configured via metaflow config.
+TENKI_API_KEY = from_conf("TENKI_API_KEY")
+# Optional override for the Tenki API endpoint (SDK default: https://api.tenki.cloud).
+TENKI_BASE_URL = from_conf("TENKI_BASE_URL")
+# Default base image for the microVM. If unset, the Tenki default image is used.
+# Must be a Tenki-registry image (Tenki does not pull external registries like
+# Docker Hub) providing python3; the backend exposes `python` and bootstraps pip
+# at startup, so the default image works, but an image with python/pip/boto3
+# preinstalled starts faster.
+TENKI_CONTAINER_IMAGE = from_conf("TENKI_CONTAINER_IMAGE")
+# Default CPU/memory for @tenki steps (used only when the step does not set them
+# and no @resources value is larger).
+TENKI_CPU = from_conf("TENKI_CPU")
+TENKI_MEMORY = from_conf("TENKI_MEMORY")
+# Optional Tenki workspace to create sandboxes in; leave unset to use the
+# token's default.
+TENKI_WORKSPACE_ID = from_conf("TENKI_WORKSPACE_ID")
+# Optional init script run before anything else inside the sandbox (parity with
+# KUBERNETES_SANDBOX_INIT_SCRIPT). Useful for configuring egress/proxy.
+TENKI_SANDBOX_INIT_SCRIPT = from_conf("TENKI_SANDBOX_INIT_SCRIPT")
 
 OTEL_ENDPOINT = from_conf("OTEL_ENDPOINT")
 ZIPKIN_ENDPOINT = from_conf("ZIPKIN_ENDPOINT")

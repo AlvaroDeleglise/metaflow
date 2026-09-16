@@ -26,6 +26,7 @@ CLIS_DESC = [
 TRAMPOLINE_CLIS_DESC = [
     ("batch", ".aws.batch.batch_cli.cli"),
     ("kubernetes", ".kubernetes.kubernetes_cli.cli"),
+    ("tenki", ".tenki.tenki_cli.cli"),
 ]
 
 # Add additional commands to the runner here
@@ -46,6 +47,7 @@ STEP_DECORATORS_DESC = [
     ("resources", ".resources_decorator.ResourcesDecorator"),
     ("batch", ".aws.batch.batch_decorator.BatchDecorator"),
     ("kubernetes", ".kubernetes.kubernetes_decorator.KubernetesDecorator"),
+    ("tenki", ".tenki.tenki_decorator.TenkiDecorator"),
     (
         "argo_workflows_internal",
         ".argo.argo_workflows_decorator.ArgoWorkflowsInternalDecorator",
@@ -180,6 +182,7 @@ DEPLOYER_IMPL_PROVIDERS_DESC = [
 ]
 
 TL_PLUGINS_DESC = [
+    ("package_sources", ".package_sources.package_sources"),
     ("yaml_parser", ".parsers.yaml_parser"),
     ("requirements_txt_parser", ".pypi.parsers.requirements_txt_parser"),
     ("namespaced_event_name", ".namespaced_events.namespaced_event_name"),
